@@ -1,4 +1,5 @@
 build/
+buildtanmatsu/
 tags
 main/kbelf_lib.c
 sdkconfig.old

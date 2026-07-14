@@ -16,11 +16,9 @@ typedef struct {
 // stripped, <script>/<style> contents are dropped entirely, common HTML
 // entities are decoded, and block-level tags become line breaks.
 //
-// This is deliberately simple -- unlike the PC-side tools/wiki_pack.py
-// (which uses BeautifulSoup to also drop navboxes/infoboxes/references by
-// CSS selector), this on-device converter has no DOM and can't selectively
-// remove those by class name. Expect more visual clutter in ZIM-backed
-// articles than in datasets prepared with wiki_pack.py.
+// This is deliberately simple -- unlike the PC-side tools/wiki_pack.py it
+// does not build a full DOM, but it does skip common MediaWiki navigation
+// boxes, infoboxes, tables of contents and reference blocks by class/id.
 //
 // Writes at most out_cap-1 bytes plus a NUL terminator into `out` (safe to
 // call with out_cap==0). Returns the number of bytes the *untruncated*

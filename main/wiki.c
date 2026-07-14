@@ -305,45 +305,77 @@ static bool zim_entry_is_browsable(zim_archive_t *zim, const zim_dirent_t *d) {
         return true;
     }
     const char *mt = zim_mimetype_str(zim, d->mimetype_index);
-    return strncmp(mt, "text/html", 9) == 0;
+    if (strncmp(mt, "text/html", 9) == 0) {
+        return true;
+    }
+
+    // Some large Kiwix ZIMs use MIME indexes beyond the subset we managed to
+    // read from the MIME list. If the entry has article-like metadata and a
+    // resolvable blob, let the loader try it instead of rejecting valid links.
+    return mt[0] == '\0' && d->title[0] != '\0' && d->path[0] != '\0';
 }
 
-static size_t wiki_search_prefix_zim(
-    wiki_dataset_t *ds, const char *prefix, size_t skip, wiki_result_t *out, size_t max_out, bool *out_has_more
-) {
-    uint32_t start   = zim_title_lower_bound(&ds->zim, prefix);
-    uint32_t total    = zim_title_count(&ds->zim);
-    size_t   prefix_len = strlen(prefix);
+static void search_prefix_to_path_prefix(const char *prefix, char *out, size_t out_cap, bool title_case) {
+    if (out_cap == 0) {
+        return;
+    }
+    size_t out_len = 0;
+    bool capitalize_next = title_case;
+    for (size_t i = 0; prefix[i] && out_len + 1 < out_cap; i++) {
+        char c = prefix[i] == ' ' ? '_' : prefix[i];
+        if (capitalize_next && c >= 'a' && c <= 'z') {
+            c = (char)(c - ('a' - 'A'));
+        }
+        capitalize_next = c == '_' || c == '-' || c == '(';
+        out[out_len++] = c;
+    }
+    out[out_len] = '\0';
+}
 
-    size_t   matched   = 0;
-    size_t   collected = 0;
-    uint32_t pos       = start;
+static bool result_entry_seen(const wiki_result_t *out, size_t count, uint32_t entry_index) {
+    for (size_t i = 0; i < count; i++) {
+        if (out[i].zim.entry_index == entry_index) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void collect_zim_path_prefix(
+    wiki_dataset_t *ds, const char *path_prefix, size_t skip, wiki_result_t *out, size_t max_out,
+    bool *out_has_more, size_t *matched, size_t *collected, uint32_t *out_scanned
+) {
+    uint32_t start      = zim_path_lower_bound(&ds->zim, path_prefix);
+    uint32_t total      = ds->zim.entry_count;
+    size_t   prefix_len = strlen(path_prefix);
+    uint32_t pos        = start;
     uint32_t scanned    = 0;
 
     while (pos < total && scanned < 5000) {
-        uint32_t entry_index;
-        if (!zim_title_pos_to_entry_index(&ds->zim, pos, &entry_index)) {
-            break;
-        }
         zim_dirent_t d;
-        if (!zim_dirent_by_entry_index(&ds->zim, entry_index, &d)) {
+        if (!zim_dirent_by_entry_index(&ds->zim, pos, &d)) {
             break;
         }
-        if (strncmp(d.title, prefix, prefix_len) != 0) {
+        if (strncmp(d.path, path_prefix, prefix_len) != 0) {
             break;
         }
         scanned++;
+
+        uint32_t entry_index = pos;
         pos++;
 
         if (!zim_entry_is_browsable(&ds->zim, &d)) {
             continue;
         }
+        if (result_entry_seen(out, *collected, entry_index)) {
+            continue;
+        }
 
-        if (matched >= skip) {
-            if (collected < max_out) {
-                make_result(&out[collected], d.title, strlen(d.title));
-                out[collected].zim.entry_index = entry_index;
-                collected++;
+        if (*matched >= skip) {
+            if (*collected < max_out) {
+                make_result(&out[*collected], d.title, strlen(d.title));
+                out[*collected].zim.entry_index = entry_index;
+                (*collected)++;
             } else {
                 if (out_has_more) {
                     *out_has_more = true;
@@ -351,9 +383,36 @@ static size_t wiki_search_prefix_zim(
                 break;
             }
         }
-        matched++;
+        (*matched)++;
     }
 
+    if (out_scanned) {
+        *out_scanned += scanned;
+    }
+    ESP_LOGI(TAG, "ZIM path search prefix='%s' start=%u scanned=%u matched=%u collected=%u more=%d",
+             path_prefix, (unsigned)start, (unsigned)scanned, (unsigned)*matched, (unsigned)*collected,
+             out_has_more ? *out_has_more : false);
+}
+
+static size_t wiki_search_prefix_zim(
+    wiki_dataset_t *ds, const char *prefix, size_t skip, wiki_result_t *out, size_t max_out, bool *out_has_more
+) {
+    size_t   matched   = 0;
+    size_t   collected = 0;
+    uint32_t scanned    = 0;
+
+    char path_prefix[ZIM_MAX_PATH_LEN];
+    char title_path_prefix[ZIM_MAX_PATH_LEN];
+    search_prefix_to_path_prefix(prefix, path_prefix, sizeof(path_prefix), false);
+    search_prefix_to_path_prefix(prefix, title_path_prefix, sizeof(title_path_prefix), true);
+
+    collect_zim_path_prefix(ds, path_prefix, skip, out, max_out, out_has_more, &matched, &collected, &scanned);
+    if (collected < max_out && strcmp(title_path_prefix, path_prefix) != 0) {
+        collect_zim_path_prefix(ds, title_path_prefix, skip, out, max_out, out_has_more, &matched, &collected, &scanned);
+    }
+
+    ESP_LOGI(TAG, "ZIM search prefix='%s' skip=%u scanned=%u collected=%u more=%d",
+             prefix, (unsigned)skip, (unsigned)scanned, (unsigned)collected, out_has_more ? *out_has_more : false);
     return collected;
 }
 
@@ -432,7 +491,6 @@ static bool wiki_load_article_zim(wiki_dataset_t *ds, const wiki_result_t *resul
     if (written >= out_cap) {
         written = out_cap - 1;
     }
-
     *out_text = text;
     *out_len  = written;
     return true;
@@ -498,7 +556,9 @@ static bool wiki_load_article_zim_ex(wiki_dataset_t *ds, const wiki_result_t *re
     if (written >= out_cap) {
         written = out_cap - 1;
     }
-
+    ESP_LOGI(TAG, "Article loaded: entry=%u path='%s' title='%s' mime=%u blob=%u text=%u links=%u",
+             (unsigned)result->zim.entry_index, d.path, d.title, (unsigned)d.mimetype_index,
+             (unsigned)blob_size, (unsigned)written, (unsigned)link_count);
     out->text       = text;
     out->len        = written;
     out->link_count = link_count;
@@ -632,7 +692,7 @@ static void normalize_link_path(const char *base_path, const char *href, char *o
     char tmp[ZIM_MAX_PATH_LEN];
     if (href[0] == '/') {
         snprintf(tmp, sizeof(tmp), "%s", href + 1);
-    } else if (strncmp(href, "./", 2) == 0) {
+    } else {
         const char *slash = strrchr(base_path, '/');
         if (slash) {
             size_t dir_len = (size_t)(slash - base_path + 1);
@@ -641,12 +701,10 @@ static void normalize_link_path(const char *base_path, const char *href, char *o
             }
             memcpy(tmp, base_path, dir_len);
             tmp[dir_len] = '\0';
-            strncat(tmp, href + 2, sizeof(tmp) - strlen(tmp) - 1);
+            strncat(tmp, strncmp(href, "./", 2) == 0 ? href + 2 : href, sizeof(tmp) - strlen(tmp) - 1);
         } else {
-            snprintf(tmp, sizeof(tmp), "%s", href + 2);
+            snprintf(tmp, sizeof(tmp), "%s", strncmp(href, "./", 2) == 0 ? href + 2 : href);
         }
-    } else {
-        snprintf(tmp, sizeof(tmp), "%s", href);
     }
     strip_fragment_and_query(tmp);
     url_decode_in_place(tmp);
@@ -724,11 +782,14 @@ bool wiki_result_from_zim_path(wiki_dataset_t *ds, const wiki_result_t *current,
 
     uint32_t    entry_index;
     zim_dirent_t d;
-    if (!zim_find_path_fast(&ds->zim, path, &entry_index, &d)) {
+    if (!zim_dirent_by_path(&ds->zim, path, &entry_index, &d) &&
+        !zim_find_path_fast(&ds->zim, path, &entry_index, &d)) {
         return false;
     }
-    if (!zim_resolve_redirect(&ds->zim, &d, 8) || !zim_entry_is_browsable(&ds->zim, &d)) {
-        ESP_LOGW(TAG, "Link target rejected: path='%s' title='%s' entry=%u", path, d.title, (unsigned)entry_index);
+    if (!zim_resolve_redirect_with_index(&ds->zim, &d, &entry_index, 8) || !zim_entry_is_browsable(&ds->zim, &d)) {
+        ESP_LOGW(TAG, "Link target rejected: path='%s' resolved_path='%s' title='%s' entry=%u mime=%u mt='%s'",
+                 path, d.path, d.title, (unsigned)entry_index, (unsigned)d.mimetype_index,
+                 zim_mimetype_str(&ds->zim, d.mimetype_index));
         return false;
     }
     make_result(out, d.title, strlen(d.title));

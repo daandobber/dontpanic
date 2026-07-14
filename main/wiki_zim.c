@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -271,6 +272,42 @@ bool zim_dirent_by_entry_index(zim_archive_t *zim, uint32_t entry_index, zim_dir
     return read_dirent_at_offset(zim, dirent_offset, out);
 }
 
+bool zim_dirent_by_path(zim_archive_t *zim, const char *path, uint32_t *out_entry_index, zim_dirent_t *out) {
+    uint32_t lo = 0;
+    uint32_t hi = zim->entry_count;
+
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        zim_dirent_t d;
+        if (!zim_dirent_by_entry_index(zim, mid, &d)) {
+            return false;
+        }
+        int cmp = strcmp(d.path, path);
+        if (cmp < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if (lo >= zim->entry_count) {
+        return false;
+    }
+
+    zim_dirent_t d;
+    if (!zim_dirent_by_entry_index(zim, lo, &d) || strcmp(d.path, path) != 0) {
+        return false;
+    }
+
+    if (out_entry_index) {
+        *out_entry_index = lo;
+    }
+    if (out) {
+        *out = d;
+    }
+    return true;
+}
+
 bool zim_title_pos_to_entry_index(zim_archive_t *zim, uint32_t title_pos, uint32_t *out_entry_index) {
     if (title_pos >= zim_title_count(zim)) {
         return false;
@@ -292,16 +329,24 @@ bool zim_dirent_by_title_pos(zim_archive_t *zim, uint32_t title_pos, zim_dirent_
 }
 
 bool zim_resolve_redirect(zim_archive_t *zim, zim_dirent_t *dirent, int max_hops) {
+    return zim_resolve_redirect_with_index(zim, dirent, NULL, max_hops);
+}
+
+bool zim_resolve_redirect_with_index(zim_archive_t *zim, zim_dirent_t *dirent, uint32_t *entry_index, int max_hops) {
     int hops = 0;
     while (dirent->is_redirect) {
         if (hops++ >= max_hops) {
             return false;
         }
+        uint32_t next_index = dirent->redirect_index;
         zim_dirent_t next;
-        if (!zim_dirent_by_entry_index(zim, dirent->redirect_index, &next)) {
+        if (!zim_dirent_by_entry_index(zim, next_index, &next)) {
             return false;
         }
         *dirent = next;
+        if (entry_index) {
+            *entry_index = next_index;
+        }
     }
     return true;
 }
@@ -318,7 +363,29 @@ uint32_t zim_title_lower_bound(zim_archive_t *zim, const char *prefix) {
         if (!zim_dirent_by_title_pos(zim, mid, &d)) {
             break;
         }
-        int cmp = strncmp(d.title, prefix, plen);
+        int cmp = strncasecmp(d.title, prefix, plen);
+        if (cmp < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+uint32_t zim_path_lower_bound(zim_archive_t *zim, const char *prefix) {
+    uint32_t count = zim->entry_count;
+    size_t   plen  = strlen(prefix);
+
+    uint32_t lo = 0, hi = count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+
+        zim_dirent_t d;
+        if (!zim_dirent_by_entry_index(zim, mid, &d)) {
+            break;
+        }
+        int cmp = strncmp(d.path, prefix, plen);
         if (cmp < 0) {
             lo = mid + 1;
         } else {

@@ -11,6 +11,8 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_types.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "hal/lcd_types.h"
 #include "nvs_flash.h"
 #include "pax_fonts.h"
@@ -47,13 +49,73 @@ static void blit(void) {
     }
 }
 
+static void present_app(void *ctx) {
+    (void)ctx;
+    blit();
+}
+
+static bool splash_skip_requested(void) {
+    if (!input_event_queue) {
+        return false;
+    }
+
+    bsp_input_event_t event;
+    return xQueueReceive(input_event_queue, &event, 0) == pdTRUE;
+}
+
+static void draw_logo_word(float y, const char *text) {
+    float size = 118;
+    pax_vec2f text_size = pax_text_size(GUIDE_FONT_TITLE, size, text);
+    float x = ((float)ui_h_res - text_size.x) * 0.5f;
+    if (x < 0) {
+        x = 0;
+    }
+
+    pax_draw_text(&fb, pax_col_rgb(0x30, 0x20, 0x00), GUIDE_FONT_TITLE, size, x - 6, y - 6, text);
+    pax_draw_text(&fb, pax_col_rgb(0x30, 0x20, 0x00), GUIDE_FONT_TITLE, size, x + 6, y - 6, text);
+    pax_draw_text(&fb, pax_col_rgb(0x30, 0x20, 0x00), GUIDE_FONT_TITLE, size, x - 6, y + 6, text);
+    pax_draw_text(&fb, pax_col_rgb(0x30, 0x20, 0x00), GUIDE_FONT_TITLE, size, x + 6, y + 6, text);
+    pax_draw_text(&fb, pax_col_rgb(0x7a, 0x58, 0x00), GUIDE_FONT_TITLE, size, x - 3, y, text);
+    pax_draw_text(&fb, pax_col_rgb(0x7a, 0x58, 0x00), GUIDE_FONT_TITLE, size, x + 3, y, text);
+    pax_draw_text(&fb, pax_col_rgb(0x7a, 0x58, 0x00), GUIDE_FONT_TITLE, size, x, y - 3, text);
+    pax_draw_text(&fb, pax_col_rgb(0x7a, 0x58, 0x00), GUIDE_FONT_TITLE, size, x, y + 3, text);
+    pax_draw_text(&fb, GUIDE_COLOR_RED_DIM, GUIDE_FONT_TITLE, size, x + 4, y + 5, text);
+    pax_draw_text(&fb, GUIDE_COLOR_AMBER, GUIDE_FONT_TITLE, size, x + 2, y + 2, text);
+    pax_draw_text(&fb, GUIDE_COLOR_YELLOW, GUIDE_FONT_TITLE, size, x, y, text);
+}
+
+static void boot_splash(void) {
+    if (pax_buf_get_width(&fb) == 0) {
+        ESP_LOGI(TAG, "Boot: DON'T PANIC");
+        return;
+    }
+
+    theme_clear(&fb);
+    draw_logo_word(54, "DON'T");
+    draw_logo_word(196, "PANIC!");
+    theme_draw_scanlines(&fb, (float)ui_h_res, (float)ui_v_res);
+    blit();
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t limit = pdMS_TO_TICKS(10000);
+    while ((xTaskGetTickCount() - start) < limit) {
+        if (splash_skip_requested()) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static void boot_message(const char *message) {
     if (pax_buf_get_width(&fb) == 0) {
         ESP_LOGI(TAG, "Boot: %s", message);
         return;
     }
     theme_clear(&fb);
-    pax_draw_text(&fb, GUIDE_COLOR_GREEN, GUIDE_FONT, 16, GUIDE_MARGIN, GUIDE_MARGIN, message);
+    theme_draw_panel(&fb, 6, 6, (float)ui_h_res - 12, (float)ui_v_res - 12, GUIDE_COLOR_BLUE_DIM);
+    pax_draw_text(&fb, GUIDE_COLOR_BLUE, GUIDE_FONT, 20, GUIDE_MARGIN, GUIDE_MARGIN, "THE GUIDE");
+    pax_draw_text(&fb, GUIDE_COLOR_GREEN, GUIDE_FONT, 16, GUIDE_MARGIN, GUIDE_MARGIN + 42, message);
+    theme_draw_scanlines(&fb, (float)ui_h_res, (float)ui_v_res);
     blit();
 }
 
@@ -198,17 +260,18 @@ void app_main(void) {
     bsp_led_send();
     bsp_led_set_mode(false);
 
-    // Keep startup boring and reliable: large marker-font splash rendering is
-    // too slow on this target and has triggered early crashes in PAX/newlib.
-
+    boot_splash();
     boot_message("Mounting Sub-Etha data cartridge...");
     storage_mount_sdcard();
 
     app_state_init(&app_state, &fb, (float)ui_h_res, (float)ui_v_res);
+    screens_set_present_callback(&app_state, present_app, NULL);
     screens_refresh_datasets(&app_state);
 
+    ESP_LOGI(TAG, "Rendering initial screen=%d", app_state.screen);
     screen_render(&app_state);
     blit();
+    ESP_LOGI(TAG, "Initial screen rendered");
 
     while (1) {
         bsp_input_event_t event;
@@ -224,6 +287,7 @@ void app_main(void) {
                     // Ignore key-release events, only act on key-press.
                     break;
                 }
+                ESP_LOGI(TAG, "Navigation key=%d", event.args_navigation.key);
                 if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
                     ESP_LOGI(TAG, "F1 pressed: restarting to launcher");
                     bsp_device_restart_to_launcher();
@@ -238,6 +302,10 @@ void app_main(void) {
                 break;
             }
             case INPUT_EVENT_TYPE_KEYBOARD: {
+                ESP_LOGI(TAG, "Keyboard ascii=%d '%c'", (int)event.args_keyboard.ascii,
+                         event.args_keyboard.ascii >= 0x20 && event.args_keyboard.ascii <= 0x7e
+                             ? event.args_keyboard.ascii
+                             : '.');
                 screen_on_keyboard(&app_state, event.args_keyboard.ascii);
                 dirty = true;
                 break;
@@ -246,7 +314,9 @@ void app_main(void) {
                 break;
         }
 
-        if (dirty && pax_buf_get_width(&fb) > 0) {
+        if (dirty && app_state.frame_presented) {
+            app_state.frame_presented = false;
+        } else if (dirty && pax_buf_get_width(&fb) > 0) {
             screen_render(&app_state);
             blit();
         }

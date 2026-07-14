@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 typedef struct {
     char             *out;
@@ -17,6 +18,9 @@ typedef struct {
     size_t            link_count;
     int               active_link;
     uint32_t          active_link_start;
+    int               table_depth;
+    int               table_row_cells;
+    bool              table_pending_header_sep;
 } sink_t;
 
 static void put_char(sink_t *s, char c) {
@@ -72,6 +76,12 @@ static void put_utf8(sink_t *s, uint32_t cp) {
     }
     for (size_t k = 0; k < n; k++) {
         put_char(s, buf[k]);
+    }
+}
+
+static void put_literal(sink_t *s, const char *text) {
+    for (size_t i = 0; text[i] != '\0'; i++) {
+        put_char(s, text[i]);
     }
 }
 
@@ -193,6 +203,154 @@ static bool extract_href(const char *html, size_t attr_start, size_t tag_end, ch
         }
     }
     return false;
+}
+
+static bool contains_ci_range(const char *s, size_t start, size_t end, const char *needle) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0 || start + nlen > end) {
+        return false;
+    }
+    for (size_t i = start; i + nlen <= end; i++) {
+        bool match = true;
+        for (size_t k = 0; k < nlen; k++) {
+            char a = s[i + k];
+            char b = needle[k];
+            if (a >= 'A' && a <= 'Z') {
+                a = (char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (char)(b - 'A' + 'a');
+            }
+            if (a != b) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool attr_value_has_unwanted_marker(const char *html, size_t value_start, size_t value_end) {
+    static const char *const markers[] = {
+        "navbox",      "vertical-navbox", "infobox",   "reflist",   "catlinks",
+        "mw-editsection",                 "hatnote",   "ambox",     "sistersite", "authority-control",
+        "printfooter", "license",         "licence",   "copyright", "footer-info", "mw-footer",
+    };
+    for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+        if (contains_ci_range(html, value_start, value_end, markers[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tag_has_unwanted_attrs(const char *html, size_t attr_start, size_t tag_end) {
+    size_t p = attr_start;
+    while (p < tag_end) {
+        while (p < tag_end && (html[p] == ' ' || html[p] == '\t' || html[p] == '\r' || html[p] == '\n')) {
+            p++;
+        }
+        size_t name_start = p;
+        while (p < tag_end && is_tag_name_char(html[p])) {
+            p++;
+        }
+        size_t name_end = p;
+        while (p < tag_end && (html[p] == ' ' || html[p] == '\t' || html[p] == '\r' || html[p] == '\n')) {
+            p++;
+        }
+        if (p >= tag_end || html[p] != '=') {
+            while (p < tag_end && html[p] != ' ' && html[p] != '\t' && html[p] != '\r' && html[p] != '\n') {
+                p++;
+            }
+            continue;
+        }
+        p++;
+        while (p < tag_end && (html[p] == ' ' || html[p] == '\t' || html[p] == '\r' || html[p] == '\n')) {
+            p++;
+        }
+        if (p >= tag_end) {
+            break;
+        }
+
+        char quote = 0;
+        if (html[p] == '"' || html[p] == '\'') {
+            quote = html[p++];
+        }
+        size_t value_start = p;
+        if (quote) {
+            while (p < tag_end && html[p] != quote) {
+                p++;
+            }
+        } else {
+            while (p < tag_end && html[p] != ' ' && html[p] != '\t' && html[p] != '\r' && html[p] != '\n') {
+                p++;
+            }
+        }
+        size_t value_end = p;
+        if (quote && p < tag_end) {
+            p++;
+        }
+
+        if ((attr_name_eq(html, name_start, name_end, "class") || attr_name_eq(html, name_start, name_end, "id") ||
+             attr_name_eq(html, name_start, name_end, "role")) &&
+            attr_value_has_unwanted_marker(html, value_start, value_end)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool should_skip_element(const char *html, size_t name_start, size_t name_len, size_t attr_start, size_t tag_end) {
+    if (tag_name_eq(html, name_start, name_len, "nav") || tag_name_eq(html, name_start, name_len, "aside") ||
+        tag_name_eq(html, name_start, name_len, "footer")) {
+        return true;
+    }
+    (void)html;
+    (void)attr_start;
+    (void)tag_end;
+    return false;
+}
+
+static size_t skip_to_matching_close(const char *html, size_t html_len, size_t from, size_t name_start, size_t name_len) {
+    int depth = 1;
+    size_t i = from;
+    while (i < html_len) {
+        if (html[i] != '<') {
+            i++;
+            continue;
+        }
+        size_t tag_start = i + 1;
+        bool closing = false;
+        if (tag_start < html_len && html[tag_start] == '/') {
+            closing = true;
+            tag_start++;
+        }
+        size_t nstart = tag_start;
+        size_t nend   = nstart;
+        while (nend < html_len && is_tag_name_char(html[nend])) {
+            nend++;
+        }
+        if (nend - nstart == name_len && strncasecmp(html + nstart, html + name_start, name_len) == 0) {
+            if (closing) {
+                depth--;
+            } else {
+                depth++;
+            }
+        }
+        while (i < html_len && html[i] != '>') {
+            i++;
+        }
+        if (i < html_len) {
+            i++;
+        }
+        if (depth <= 0) {
+            return i;
+        }
+    }
+    return html_len;
 }
 
 static void finish_active_link(sink_t *s) {
@@ -318,7 +476,7 @@ size_t html_to_text_with_links(
     const char *html, size_t html_len, char *out, size_t out_cap, html_text_link_t *links, size_t max_links,
     size_t *out_link_count
 ) {
-    sink_t s = {out, out_cap, 0, 2, false, false, links, max_links, 0, -1, 0};
+    sink_t s = {out, out_cap, 0, 2, false, false, links, max_links, 0, -1, 0, 0, 0, false};
 
     size_t i = 0;
     while (i < html_len) {
@@ -363,6 +521,10 @@ size_t html_to_text_with_links(
             bool is_script = tag_name_eq(html, name_start, name_len, "script");
             bool is_style   = tag_name_eq(html, name_start, name_len, "style");
             bool is_anchor  = tag_name_eq(html, name_start, name_len, "a");
+            bool is_table   = tag_name_eq(html, name_start, name_len, "table");
+            bool is_tr      = tag_name_eq(html, name_start, name_len, "tr");
+            bool is_th      = tag_name_eq(html, name_start, name_len, "th");
+            bool is_td      = tag_name_eq(html, name_start, name_len, "td");
 
             if (!closing && (is_script || is_style)) {
                 const char *close_tag  = is_script ? "</script" : "</style";
@@ -377,6 +539,14 @@ size_t html_to_text_with_links(
                     }
                     i = (k < html_len) ? k + 1 : html_len;
                 }
+                continue;
+            }
+
+            if (!closing && should_skip_element(html, name_start, name_len, name_end, close_i)) {
+                finish_active_link(&s);
+                i = skip_to_matching_close(html, html_len, (close_i < html_len) ? close_i + 1 : html_len, name_start,
+                                           name_len);
+                put_char(&s, '\n');
                 continue;
             }
 
@@ -395,7 +565,40 @@ size_t html_to_text_with_links(
                 }
             }
 
-            if (is_block_tag(html, name_start, name_len)) {
+            bool handled_table_tag = is_table || is_tr || is_th || is_td;
+            if (is_table) {
+                put_char(&s, '\n');
+                if (closing) {
+                    if (s.table_depth > 0) {
+                        s.table_depth--;
+                    }
+                } else {
+                    s.table_depth++;
+                }
+            } else if (s.table_depth > 0 && is_tr) {
+                if (closing) {
+                    s.table_pending_header_sep = false;
+                    put_char(&s, '\n');
+                } else {
+                    s.table_row_cells          = 0;
+                    s.table_pending_header_sep = false;
+                    put_char(&s, '\n');
+                }
+            } else if (s.table_depth > 0 && (is_th || is_td)) {
+                if (closing) {
+                    if (is_th) {
+                        s.table_pending_header_sep = true;
+                    }
+                } else {
+                    if (s.table_row_cells > 0) {
+                        put_literal(&s, "\t");
+                    }
+                    s.table_pending_header_sep = false;
+                    s.table_row_cells++;
+                }
+            }
+
+            if (!handled_table_tag && is_block_tag(html, name_start, name_len)) {
                 put_char(&s, '\n');
             }
 

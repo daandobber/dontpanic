@@ -13,6 +13,7 @@ idf_component_register(
 		"html_text.c"
 		"screens.c"
 		"ui_theme.c"
+		"hosted_reset.c"
 	PRIV_REQUIRES
 		esp_lcd
 		fatfs

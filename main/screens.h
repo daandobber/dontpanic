@@ -11,6 +11,8 @@
 typedef enum {
     SCREEN_NO_CARD,
     SCREEN_DATASETS,
+    SCREEN_SETTINGS,
+    SCREEN_LOADING,
     SCREEN_HOME,
     SCREEN_BROWSER,
     SCREEN_READER,
@@ -26,11 +28,26 @@ typedef struct {
     float        w;
     float        h;
     app_screen_t screen;
+    app_screen_t settings_return_screen;
+
+    void (*present_cb)(void *ctx);
+    void *present_ctx;
+    bool frame_presented;
+
+    // SCREEN_LOADING
+    char loading_title[64];
+    char loading_message[96];
+    int  loading_percent;
 
     // SCREEN_DATASETS
     wiki_dataset_info_t datasets[WIKI_MAX_DATASETS];
     size_t               dataset_count;
     size_t               dataset_selected;
+
+    // SCREEN_SETTINGS
+    size_t settings_selected;
+    char   default_dataset_slug[WIKI_SLUG_MAX];
+    bool   default_dataset_valid;
 
     // Currently opened dataset (valid while browsing/reading)
     wiki_dataset_t current_dataset;
@@ -54,16 +71,21 @@ typedef struct {
     wiki_result_t      current_result;
     wiki_article_t      article;
     wiki_text_line_t   *article_lines;
+    char              **article_line_cache;
     size_t              article_line_count;
     size_t              article_line_capacity;
     size_t              reader_scroll;
     size_t              reader_visible_lines;
     size_t              reader_link_selected;
+    bool                reader_links_enabled;
     char                reader_status[128];
 } app_state_t;
 
 // Sets up an empty app state for the given framebuffer/resolution.
 void app_state_init(app_state_t *st, pax_buf_t *fb, float w, float h);
+
+// Registers a display-present callback used for progress/loading screens.
+void screens_set_present_callback(app_state_t *st, void (*present_cb)(void *ctx), void *ctx);
 
 // (Re)scans the SD card for wiki datasets and switches to SCREEN_DATASETS, or
 // SCREEN_NO_CARD if none were found / the card isn't mounted.

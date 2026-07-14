@@ -27,7 +27,7 @@
 #define WIKI_DESC_MAX          160
 #define WIKI_MAX_DATASETS      16
 #define WIKI_MAX_RESULTS       14
-#define WIKI_ARTICLE_MAX_BYTES (96 * 1024)
+#define WIKI_ARTICLE_MAX_BYTES (512 * 1024)
 
 typedef enum {
     WIKI_BACKEND_FLAT,  // tools/wiki_pack.py output folder

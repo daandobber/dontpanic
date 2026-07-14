@@ -35,7 +35,7 @@
 
 #include "ff.h"
 
-#define ZIM_MAX_MIMETYPES  32
+#define ZIM_MAX_MIMETYPES  128
 #define ZIM_MAX_MIMETYPE_LEN 64
 #define ZIM_MAX_TITLE_LEN  512
 #define ZIM_MAX_PATH_LEN   512
@@ -104,16 +104,25 @@ bool zim_title_pos_to_entry_index(zim_archive_t *zim, uint32_t title_pos, uint32
 // Reads the dirent at raw entry index `entry_index` (0..entry_count-1).
 bool zim_dirent_by_entry_index(zim_archive_t *zim, uint32_t entry_index, zim_dirent_t *out);
 
+// Finds a dirent by its exact ZIM path.
+bool zim_dirent_by_path(zim_archive_t *zim, const char *path, uint32_t *out_entry_index, zim_dirent_t *out);
+
 // If `dirent` is a redirect, follows it (up to `max_hops` times) and
 // replaces *dirent with the final non-redirect entry. Returns false on a
 // broken/looping redirect chain.
 bool zim_resolve_redirect(zim_archive_t *zim, zim_dirent_t *dirent, int max_hops);
+bool zim_resolve_redirect_with_index(zim_archive_t *zim, zim_dirent_t *dirent, uint32_t *entry_index, int max_hops);
 
 // Returns the lowest title-index position whose title is not lexically
 // before `prefix` (a case-sensitive lower_bound, matching ZIM's own sort
 // order). Every title starting with `prefix` forms a contiguous run from
 // this position onward.
 uint32_t zim_title_lower_bound(zim_archive_t *zim, const char *prefix);
+
+// Finds the lowest path-index position whose path is not lexically before
+// `prefix`. This is a practical fallback for ZIMs without a usable title
+// index; article paths are title-like in Kiwix Wikipedia dumps.
+uint32_t zim_path_lower_bound(zim_archive_t *zim, const char *prefix);
 
 const char *zim_mimetype_str(const zim_archive_t *zim, uint16_t index);
 

@@ -46,6 +46,9 @@ IDF_PARAMS := -B $(BUILD) build -DDEVICE=$(DEVICE) -DSDKCONFIG_DEFAULTS="$(SDKCO
 export IDF_TOOLS_PATH
 export IDF_GITHUB_ASSETS
 
+APPFS_ID ?= application
+APPFS_NAME ?= Don't Panic
+
 # General targets
 
 .PHONY: all
@@ -61,11 +64,11 @@ badgelink:
 .PHONY: install
 install: build
 install:
-	cd badgelink/tools; ./badgelink.sh appfs upload application "template application" 0 ../../$(BUILD)/application.bin
+	cd badgelink/tools; ./badgelink.sh appfs upload $(APPFS_ID) "$(APPFS_NAME)" 0 ../../$(BUILD)/application.bin
 
 .PHONY: run
 run:
-	cd badgelink/tools; ./badgelink.sh start application
+	cd badgelink/tools; ./badgelink.sh start $(APPFS_ID)
 
 # Preparation
 
